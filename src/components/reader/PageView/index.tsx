@@ -1,24 +1,14 @@
-import React, { useRef, useCallback, useMemo } from 'react';
+import React, { useRef, useCallback, useMemo, useState } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   Dimensions,
   ScrollView,
+  Animated,
+  PanResponder,
+  TouchableWithoutFeedback,
 } from 'react-native';
-import {
-  Gesture,
-  GestureDetector,
-  GestureHandlerRootView,
-} from 'react-native-gesture-handler';
-import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
-  withTiming,
-  runOnJS,
-  interpolate,
-  Extrapolate,
-} from 'react-native-reanimated';
 import { PageMode, ReadConfig } from '../../../types';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -47,7 +37,7 @@ function paginateContent(
 ): Page[] {
   const { fontSize, lineHeight, paragraphSpacing, paddingVertical, indent } = config;
   const lineHeightPx = fontSize * lineHeight;
-  const availableHeight = containerHeight - paddingVertical * 2;
+  const availableHeight = containerHeight - paddingVertical * 2 - 60; // 留出顶部章节标题空间
   const availableWidth = containerWidth - config.paddingHorizontal * 2;
   
   // 估算每行字符数
@@ -104,249 +94,142 @@ function paginateContent(
   return pages.length > 0 ? pages : [{ index: 0, content: '' }];
 }
 
-// 滑动翻页组件
+// 滑动翻页组件 - 使用原生 Animated
 const SlidePageView: React.FC<PageViewProps & { pages: Page[] }> = ({
   pages,
   config,
+  chapterTitle,
   onPrevPage,
   onNextPage,
   onTapCenter,
 }) => {
-  const currentPage = useSharedValue(0);
-  const translateX = useSharedValue(0);
+  const [currentPage, setCurrentPage] = useState(0);
+  const translateX = useRef(new Animated.Value(0)).current;
+  const lastOffset = useRef(0);
 
-  const goToPage = useCallback((index: number) => {
-    'worklet';
-    currentPage.value = index;
-    translateX.value = withTiming(-index * SCREEN_WIDTH, { duration: 300 });
-  }, []);
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: (_, gestureState) => {
+        return Math.abs(gestureState.dx) > 10;
+      },
+      onPanResponderMove: (_, gestureState) => {
+        translateX.setValue(lastOffset.current + gestureState.dx);
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        const threshold = SCREEN_WIDTH / 4;
+        let targetPage = currentPage;
 
-  const panGesture = Gesture.Pan()
-    .onUpdate((event) => {
-      const newX = -currentPage.value * SCREEN_WIDTH + event.translationX;
-      translateX.value = newX;
+        if (gestureState.dx > threshold && currentPage > 0) {
+          targetPage = currentPage - 1;
+        } else if (gestureState.dx < -threshold && currentPage < pages.length - 1) {
+          targetPage = currentPage + 1;
+        }
+
+        const toValue = -targetPage * SCREEN_WIDTH;
+        lastOffset.current = toValue;
+        setCurrentPage(targetPage);
+
+        Animated.spring(translateX, {
+          toValue,
+          useNativeDriver: true,
+          tension: 100,
+          friction: 10,
+        }).start();
+
+        // 触发章节切换
+        if (gestureState.dx > threshold && currentPage === 0) {
+          onPrevPage?.();
+        } else if (gestureState.dx < -threshold && currentPage === pages.length - 1) {
+          onNextPage?.();
+        }
+      },
     })
-    .onEnd((event) => {
-      const velocity = event.velocityX;
-      const threshold = SCREEN_WIDTH / 4;
+  ).current;
 
-      let targetPage = currentPage.value;
+  const handleTap = (x: number) => {
+    const leftArea = SCREEN_WIDTH * 0.3;
+    const rightArea = SCREEN_WIDTH * 0.7;
 
-      if (Math.abs(event.translationX) > threshold || Math.abs(velocity) > 500) {
-        if (event.translationX > 0 && currentPage.value > 0) {
-          targetPage = currentPage.value - 1;
-        } else if (event.translationX < 0 && currentPage.value < pages.length - 1) {
-          targetPage = currentPage.value + 1;
-        }
-      }
-
-      goToPage(targetPage);
-    });
-
-  const tapGesture = Gesture.Tap()
-    .onEnd((event) => {
-      const x = event.x;
-      const leftArea = SCREEN_WIDTH * 0.3;
-      const rightArea = SCREEN_WIDTH * 0.7;
-
-      if (x < leftArea) {
-        if (currentPage.value > 0) {
-          goToPage(currentPage.value - 1);
-        } else {
-          runOnJS(onPrevPage!)();
-        }
-      } else if (x > rightArea) {
-        if (currentPage.value < pages.length - 1) {
-          goToPage(currentPage.value + 1);
-        } else {
-          runOnJS(onNextPage!)();
-        }
+    if (x < leftArea) {
+      if (currentPage > 0) {
+        const targetPage = currentPage - 1;
+        const toValue = -targetPage * SCREEN_WIDTH;
+        lastOffset.current = toValue;
+        setCurrentPage(targetPage);
+        Animated.spring(translateX, {
+          toValue,
+          useNativeDriver: true,
+        }).start();
       } else {
-        runOnJS(onTapCenter!)();
+        onPrevPage?.();
       }
-    });
-
-  const gesture = Gesture.Exclusive(panGesture, tapGesture);
-
-  const animatedStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: translateX.value }],
-  }));
+    } else if (x > rightArea) {
+      if (currentPage < pages.length - 1) {
+        const targetPage = currentPage + 1;
+        const toValue = -targetPage * SCREEN_WIDTH;
+        lastOffset.current = toValue;
+        setCurrentPage(targetPage);
+        Animated.spring(translateX, {
+          toValue,
+          useNativeDriver: true,
+        }).start();
+      } else {
+        onNextPage?.();
+      }
+    } else {
+      onTapCenter?.();
+    }
+  };
 
   return (
-    <GestureDetector gesture={gesture}>
-      <View style={styles.container}>
-        <Animated.View style={[styles.pagesContainer, animatedStyle]}>
-          {pages.map((page, index) => (
-            <View
-              key={index}
-              style={[
-                styles.page,
-                {
-                  backgroundColor: config.bgColor,
-                  paddingHorizontal: config.paddingHorizontal,
-                  paddingVertical: config.paddingVertical,
-                },
-              ]}
-            >
-              <Text
-                style={{
-                  color: config.textColor,
-                  fontSize: config.fontSize,
-                  lineHeight: config.fontSize * config.lineHeight,
-                }}
-              >
-                {page.content}
-              </Text>
-            </View>
-          ))}
-        </Animated.View>
-        {/* 页码指示器 */}
-        <View style={styles.pageIndicator}>
-          <Text style={[styles.pageIndicatorText, { color: config.textColor }]}>
-            {currentPage.value + 1} / {pages.length}
-          </Text>
-        </View>
-      </View>
-    </GestureDetector>
-  );
-};
-
-// 覆盖翻页组件
-const CoverPageView: React.FC<PageViewProps & { pages: Page[] }> = ({
-  pages,
-  config,
-  onPrevPage,
-  onNextPage,
-  onTapCenter,
-}) => {
-  const currentPage = useSharedValue(0);
-  const dragX = useSharedValue(0);
-  const isDragging = useSharedValue(false);
-
-  const goToPage = useCallback((index: number) => {
-    'worklet';
-    currentPage.value = index;
-    dragX.value = 0;
-    isDragging.value = false;
-  }, []);
-
-  const panGesture = Gesture.Pan()
-    .onStart(() => {
-      isDragging.value = true;
-    })
-    .onUpdate((event) => {
-      dragX.value = event.translationX;
-    })
-    .onEnd((event) => {
-      const threshold = SCREEN_WIDTH / 3;
-
-      if (event.translationX > threshold && currentPage.value > 0) {
-        goToPage(currentPage.value - 1);
-      } else if (event.translationX < -threshold && currentPage.value < pages.length - 1) {
-        goToPage(currentPage.value + 1);
-      } else {
-        dragX.value = withTiming(0, { duration: 200 });
-        isDragging.value = false;
-      }
-    });
-
-  const tapGesture = Gesture.Tap()
-    .onEnd((event) => {
-      const x = event.x;
-      const leftArea = SCREEN_WIDTH * 0.3;
-      const rightArea = SCREEN_WIDTH * 0.7;
-
-      if (x < leftArea) {
-        if (currentPage.value > 0) {
-          goToPage(currentPage.value - 1);
-        } else {
-          runOnJS(onPrevPage!)();
-        }
-      } else if (x > rightArea) {
-        if (currentPage.value < pages.length - 1) {
-          goToPage(currentPage.value + 1);
-        } else {
-          runOnJS(onNextPage!)();
-        }
-      } else {
-        runOnJS(onTapCenter!)();
-      }
-    });
-
-  const gesture = Gesture.Exclusive(panGesture, tapGesture);
-
-  const topPageStyle = useAnimatedStyle(() => {
-    const translateX = interpolate(
-      dragX.value,
-      [-SCREEN_WIDTH, 0, SCREEN_WIDTH],
-      [0, 0, SCREEN_WIDTH],
-      Extrapolate.CLAMP
-    );
-
-    return {
-      transform: [{ translateX }],
-      zIndex: 10,
-    };
-  });
-
-  return (
-    <GestureDetector gesture={gesture}>
-      <View style={styles.container}>
-        {/* 底页（下一页） */}
-        {currentPage.value < pages.length - 1 && (
-          <View
+    <View style={styles.container}>
+      <TouchableWithoutFeedback onPress={(e) => handleTap(e.nativeEvent.locationX)}>
+        <View style={styles.container} {...panResponder.panHandlers}>
+          <Animated.View
             style={[
-              styles.coverPage,
-              {
-                backgroundColor: config.bgColor,
-                paddingHorizontal: config.paddingHorizontal,
-                paddingVertical: config.paddingVertical,
-              },
+              styles.pagesContainer,
+              { transform: [{ translateX }] },
             ]}
           >
-            <Text
-              style={{
-                color: config.textColor,
-                fontSize: config.fontSize,
-                lineHeight: config.fontSize * config.lineHeight,
-              }}
-            >
-              {pages[currentPage.value + 1]?.content}
-            </Text>
-          </View>
-        )}
-
-        {/* 顶页（当前页） */}
-        <Animated.View
-          style={[
-            styles.coverPage,
-            topPageStyle,
-            {
-              backgroundColor: config.bgColor,
-              paddingHorizontal: config.paddingHorizontal,
-              paddingVertical: config.paddingVertical,
-            },
-          ]}
-        >
-          <Text
-            style={{
-              color: config.textColor,
-              fontSize: config.fontSize,
-              lineHeight: config.fontSize * config.lineHeight,
-            }}
-          >
-            {pages[currentPage.value]?.content}
-          </Text>
-        </Animated.View>
-
-        {/* 页码 */}
-        <View style={styles.pageIndicator}>
-          <Text style={[styles.pageIndicatorText, { color: config.textColor }]}>
-            {currentPage.value + 1} / {pages.length}
-          </Text>
+            {pages.map((page, index) => (
+              <View
+                key={index}
+                style={[
+                  styles.page,
+                  {
+                    backgroundColor: config.bgColor,
+                    paddingHorizontal: config.paddingHorizontal,
+                    paddingVertical: config.paddingVertical,
+                  },
+                ]}
+              >
+                {index === 0 && chapterTitle && (
+                  <Text style={[styles.chapterTitle, { color: config.textColor }]}>
+                    {chapterTitle}
+                  </Text>
+                )}
+                <Text
+                  style={{
+                    color: config.textColor,
+                    fontSize: config.fontSize,
+                    lineHeight: config.fontSize * config.lineHeight,
+                  }}
+                >
+                  {page.content}
+                </Text>
+              </View>
+            ))}
+          </Animated.View>
         </View>
+      </TouchableWithoutFeedback>
+      {/* 页码指示器 */}
+      <View style={styles.pageIndicator}>
+        <Text style={[styles.pageIndicatorText, { color: config.textColor }]}>
+          {currentPage + 1} / {pages.length}
+        </Text>
       </View>
-    </GestureDetector>
+    </View>
   );
 };
 
@@ -377,40 +260,42 @@ const ScrollPageView: React.FC<PageViewProps> = ({
   }, [onPrevPage, onNextPage, onTapCenter]);
 
   return (
-    <ScrollView
-      ref={scrollRef}
-      style={[styles.scrollContainer, { backgroundColor: config.bgColor }]}
-      contentContainerStyle={{
-        paddingHorizontal: config.paddingHorizontal,
-        paddingVertical: config.paddingVertical,
-      }}
-      showsVerticalScrollIndicator={false}
-    >
-      {chapterTitle && (
-        <Text
-          style={[
-            styles.chapterTitle,
-            { color: config.textColor },
-          ]}
-        >
-          {chapterTitle}
-        </Text>
-      )}
-      {paragraphs.map((paragraph, index) => (
-        <Text
-          key={index}
-          style={{
-            color: config.textColor,
-            fontSize: config.fontSize,
-            lineHeight: config.fontSize * config.lineHeight,
-            marginBottom: config.paragraphSpacing,
-            textAlign: 'justify',
-          }}
-        >
-          {indentStr}{paragraph}
-        </Text>
-      ))}
-    </ScrollView>
+    <TouchableWithoutFeedback onPress={(e) => handleTap(e.nativeEvent.locationX)}>
+      <ScrollView
+        ref={scrollRef}
+        style={[styles.scrollContainer, { backgroundColor: config.bgColor }]}
+        contentContainerStyle={{
+          paddingHorizontal: config.paddingHorizontal,
+          paddingVertical: config.paddingVertical,
+        }}
+        showsVerticalScrollIndicator={false}
+      >
+        {chapterTitle && (
+          <Text
+            style={[
+              styles.chapterTitle,
+              { color: config.textColor },
+            ]}
+          >
+            {chapterTitle}
+          </Text>
+        )}
+        {paragraphs.map((paragraph, index) => (
+          <Text
+            key={index}
+            style={{
+              color: config.textColor,
+              fontSize: config.fontSize,
+              lineHeight: config.fontSize * config.lineHeight,
+              marginBottom: config.paragraphSpacing,
+              textAlign: 'justify',
+            }}
+          >
+            {indentStr}{paragraph}
+          </Text>
+        ))}
+      </ScrollView>
+    </TouchableWithoutFeedback>
   );
 };
 
@@ -419,7 +304,7 @@ export const PageView: React.FC<PageViewProps> = (props) => {
   const { content, config, mode } = props;
 
   const pages = useMemo(() => {
-    if (mode === PageMode.SCROLL) {
+    if (mode === PageMode.SCROLL || mode === PageMode.NONE) {
       return [];
     }
     return paginateContent(
@@ -433,9 +318,8 @@ export const PageView: React.FC<PageViewProps> = (props) => {
   const renderContent = () => {
     switch (mode) {
       case PageMode.SLIDE:
-        return <SlidePageView {...props} pages={pages} />;
       case PageMode.COVER:
-        return <CoverPageView {...props} pages={pages} />;
+        return <SlidePageView {...props} pages={pages} />;
       case PageMode.SCROLL:
       case PageMode.NONE:
       default:
@@ -443,17 +327,10 @@ export const PageView: React.FC<PageViewProps> = (props) => {
     }
   };
 
-  return (
-    <GestureHandlerRootView style={styles.root}>
-      {renderContent()}
-    </GestureHandlerRootView>
-  );
+  return renderContent();
 };
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-  },
   container: {
     flex: 1,
   },
@@ -464,13 +341,6 @@ const styles = StyleSheet.create({
   page: {
     width: SCREEN_WIDTH,
     height: SCREEN_HEIGHT,
-  },
-  coverPage: {
-    position: 'absolute',
-    width: SCREEN_WIDTH,
-    height: SCREEN_HEIGHT,
-    top: 0,
-    left: 0,
   },
   scrollContainer: {
     flex: 1,
