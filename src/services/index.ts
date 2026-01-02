@@ -5,3 +5,7 @@ export * from './sourceParser';
 export * from './localBookService';
 export * from './replaceRuleService';
 export * from './rssService';
+export * from './ttsService';
+export * from './bookmarkService';
+export * from './bookGroupService';
+export * from './backupService';

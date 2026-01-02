@@ -1,31 +1,33 @@
 import React, { useEffect, useCallback, useRef, useState } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, ScrollView,
-  Dimensions, ActivityIndicator, StatusBar, Animated
+  View, StyleSheet, StatusBar, Animated, Text, ActivityIndicator
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
-import * as ScreenOrientation from 'expo-screen-orientation';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useReaderStore } from '../../stores';
 import { PageMode } from '../../types';
 import { ReaderMenu } from './ReaderMenu';
 import { ChapterList } from './ChapterList';
-
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+import { TTSPanel } from './TTSPanel';
+import { PageView } from './PageView';
 
 export const ReaderView: React.FC = () => {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const {
     book, chapters, currentChapter, currentChapterIndex,
-    content, loading, config, openBook, loadChapter, nextChapter, prevChapter
+    content, loading, config, openBook, loadChapter, nextChapter, prevChapter, loadConfig
   } = useReaderStore();
 
   const [menuVisible, setMenuVisible] = useState(false);
   const [tocVisible, setTocVisible] = useState(false);
-  const scrollRef = useRef<ScrollView>(null);
+  const [ttsVisible, setTtsVisible] = useState(false);
   const menuOpacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    // 加载阅读配置
+    loadConfig();
+  }, []);
 
   useEffect(() => {
     if (id) {
@@ -54,29 +56,25 @@ export const ReaderView: React.FC = () => {
     }
   }, [menuVisible]);
 
-  const handleTap = useCallback((x: number) => {
-    if (!config.clickPageTurn) {
-      toggleMenu();
-      return;
-    }
-
-    const leftArea = SCREEN_WIDTH * 0.3;
-    const rightArea = SCREEN_WIDTH * 0.7;
-
-    if (x < leftArea) {
-      prevChapter();
-    } else if (x > rightArea) {
-      nextChapter();
-    } else {
-      toggleMenu();
-    }
-  }, [config.clickPageTurn, prevChapter, nextChapter, toggleMenu]);
-
   const handleChapterSelect = useCallback((index: number) => {
     loadChapter(index);
     setTocVisible(false);
-    scrollRef.current?.scrollTo({ y: 0, animated: false });
   }, [loadChapter]);
+
+  const handlePrevPage = useCallback(() => {
+    // 在分页模式下，如果是第一页则切换到上一章
+    prevChapter();
+  }, [prevChapter]);
+
+  const handleNextPage = useCallback(() => {
+    // 在分页模式下，如果是最后一页则切换到下一章
+    nextChapter();
+  }, [nextChapter]);
+
+  const handleOpenTTS = useCallback(() => {
+    toggleMenu();
+    setTtsVisible(true);
+  }, [toggleMenu]);
 
   if (!book) {
     return (
@@ -87,80 +85,27 @@ export const ReaderView: React.FC = () => {
     );
   }
 
-  const textIndent = config.indent > 0 ? '　'.repeat(config.indent) : '';
-  const paragraphs = content.split('\n').filter(p => p.trim());
-
   return (
     <View style={[styles.container, { backgroundColor: config.bgColor }]}>
       <StatusBar hidden={!menuVisible} />
 
       {/* 内容区域 */}
-      <TouchableOpacity
-        activeOpacity={1}
-        onPress={(e) => handleTap(e.nativeEvent.locationX)}
-        style={styles.contentContainer}
-      >
-        <ScrollView
-          ref={scrollRef}
-          style={styles.scrollView}
-          contentContainerStyle={[
-            styles.contentPadding,
-            {
-              paddingHorizontal: config.paddingHorizontal,
-              paddingVertical: config.paddingVertical,
-            }
-          ]}
-          showsVerticalScrollIndicator={false}
-        >
-          {/* 章节标题 */}
-          <Text style={[styles.chapterTitle, { color: config.textColor }]}>
-            {currentChapter?.title}
-          </Text>
-
-          {/* 正文内容 */}
-          {loading ? (
-            <View style={styles.chapterLoading}>
-              <ActivityIndicator size="small" color={config.textColor} />
-              <Text style={[styles.loadingText, { color: config.textColor }]}>加载中...</Text>
-            </View>
-          ) : (
-            paragraphs.map((paragraph, index) => (
-              <Text
-                key={index}
-                style={[
-                  styles.paragraph,
-                  {
-                    color: config.textColor,
-                    fontSize: config.fontSize,
-                    lineHeight: config.fontSize * config.lineHeight,
-                    marginBottom: config.paragraphSpacing,
-                  }
-                ]}
-              >
-                {textIndent}{paragraph}
-              </Text>
-            ))
-          )}
-
-          {/* 章节导航 */}
-          <View style={styles.chapterNav}>
-            <TouchableOpacity
-              style={[styles.navButton, currentChapterIndex === 0 && styles.navButtonDisabled]}
-              onPress={prevChapter}
-              disabled={currentChapterIndex === 0}
-            >
-              <Text style={styles.navButtonText}>上一章</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.navButton, currentChapterIndex >= chapters.length - 1 && styles.navButtonDisabled]}
-              onPress={nextChapter}
-              disabled={currentChapterIndex >= chapters.length - 1}
-            >
-              <Text style={styles.navButtonText}>下一章</Text>
-            </TouchableOpacity>
-          </View>
-        </ScrollView>
-      </TouchableOpacity>
+      {loading ? (
+        <View style={styles.chapterLoading}>
+          <ActivityIndicator size="small" color={config.textColor} />
+          <Text style={[styles.loadingText, { color: config.textColor }]}>加载中...</Text>
+        </View>
+      ) : (
+        <PageView
+          content={content}
+          config={config}
+          mode={config.pageMode}
+          chapterTitle={currentChapter?.title}
+          onPrevPage={handlePrevPage}
+          onNextPage={handleNextPage}
+          onTapCenter={toggleMenu}
+        />
+      )}
 
       {/* 菜单 */}
       {menuVisible && (
@@ -171,6 +116,7 @@ export const ReaderView: React.FC = () => {
               toggleMenu();
               setTocVisible(true);
             }}
+            onOpenTTS={handleOpenTTS}
             onBack={() => router.back()}
           />
         </Animated.View>
@@ -185,6 +131,13 @@ export const ReaderView: React.FC = () => {
           onClose={() => setTocVisible(false)}
         />
       )}
+
+      {/* TTS 面板 */}
+      <TTSPanel
+        content={content}
+        visible={ttsVisible}
+        onClose={() => setTtsVisible(false)}
+      />
     </View>
   );
 };
@@ -204,50 +157,14 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#666',
   },
-  contentContainer: {
-    flex: 1,
-  },
-  scrollView: {
-    flex: 1,
-  },
-  contentPadding: {
-    flexGrow: 1,
-  },
-  chapterTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    marginBottom: 24,
-    textAlign: 'center',
-  },
   chapterLoading: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    minHeight: 200,
-  },
-  paragraph: {
-    textAlign: 'justify',
-  },
-  chapterNav: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 40,
-    paddingHorizontal: 20,
-  },
-  navButton: {
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    backgroundColor: '#007AFF',
-    borderRadius: 8,
-  },
-  navButtonDisabled: {
-    backgroundColor: '#ccc',
-  },
-  navButtonText: {
-    color: '#fff',
-    fontSize: 16,
   },
   menuOverlay: {
     ...StyleSheet.absoluteFillObject,
   },
 });
+
+export default ReaderView;

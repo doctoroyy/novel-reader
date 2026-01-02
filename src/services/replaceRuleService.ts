@@ -57,6 +57,26 @@ export const deleteReplaceRule = async (id: string): Promise<void> => {
   await execute('DELETE FROM replace_rules WHERE id = ?', [id]);
 };
 
+export const getReplaceRuleById = async (id: string): Promise<ReplaceRule | null> => {
+  const row = await queryFirst<any>('SELECT * FROM replace_rules WHERE id = ?', [id]);
+  return row ? mapRowToRule(row) : null;
+};
+
+export const updateReplaceRule = async (rule: ReplaceRule): Promise<void> => {
+  await execute(
+    `UPDATE replace_rules SET name = ?, rule_group = ?, pattern = ?, replacement = ?,
+     scope = ?, isEnabled = ?, isRegex = ?, sort_order = ? WHERE id = ?`,
+    [rule.name, rule.group, rule.pattern, rule.replacement, rule.scope,
+     rule.isEnabled ? 1 : 0, rule.isRegex ? 1 : 0, rule.order, rule.id]
+  );
+};
+
+export const reorderReplaceRules = async (ids: string[]): Promise<void> => {
+  for (let i = 0; i < ids.length; i++) {
+    await execute('UPDATE replace_rules SET sort_order = ? WHERE id = ?', [i, ids[i]]);
+  }
+};
+
 export const applyReplaceRules = async (content: string): Promise<string> => {
   const rules = await getEnabledReplaceRules();
 

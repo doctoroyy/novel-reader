@@ -112,7 +112,7 @@ export default function SettingsScreen() {
         {renderSection('书源管理')}
         <View style={styles.section}>
           {renderItem('library', '书源列表', `${sources.length} 个书源`, () => {
-            // 打开书源管理页面
+            router.push('/source/list' as any);
           })}
           {renderItem('cloud-download', '网络导入', undefined, handleImportFromUrl)}
           {renderItem('document', '本地导入', undefined, handleImportBookSources)}
@@ -121,9 +121,16 @@ export default function SettingsScreen() {
         {renderSection('替换净化')}
         <View style={styles.section}>
           {renderItem('swap-horizontal', '替换规则', `${replaceRuleCount} 条规则`, () => {
-            // 打开替换规则页面
+            router.push('/replace/list' as any);
           })}
           {renderItem('document', '导入规则', undefined, handleImportReplaceRules)}
+        </View>
+
+        {renderSection('书架管理')}
+        <View style={styles.section}>
+          {renderItem('folder-open', '分组管理', undefined, () => {
+            router.push('/bookshelf/groups' as any);
+          })}
         </View>
 
         {renderSection('阅读设置')}
@@ -141,7 +148,9 @@ export default function SettingsScreen() {
               { text: '确定', style: 'destructive', onPress: () => {} },
             ]);
           })}
-          {renderItem('cloud-upload', '备份与恢复', undefined, () => {})}
+          {renderItem('cloud-upload', '备份与恢复', undefined, () => {
+            router.push('/settings/backup' as any);
+          })}
           {renderItem('information-circle', '关于', undefined, () => {
             Alert.alert('小说阅读器', '版本 1.0.0\n\n参考 Legado 开发的跨平台阅读器');
           })}
