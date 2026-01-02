@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Book, BookChapter, BookSource, ReadConfig, DEFAULT_READ_CONFIG } from '../types';
+import { Book, BookChapter, BookSource, RssSource, ReadConfig, DEFAULT_READ_CONFIG, BookType } from '../types';
 import * as services from '../services';
 
 // ==================== 书架 Store ====================
@@ -104,11 +104,18 @@ export const useReaderStore = create<ReaderState>((set, get) => ({
 
       if (!content) {
         if (book.isLocal && book.localPath) {
-          content = await services.getLocalChapterContent(
-            book.localPath,
-            chapter.startPos || 0,
-            chapter.endPos || 0
-          );
+          if (book.type === BookType.LOCAL_TXT) {
+            content = await services.getLocalChapterContent(
+              book.localPath,
+              chapter.startPos || 0,
+              chapter.endPos || 0
+            );
+          } else if (book.type === BookType.LOCAL_EPUB) {
+            content = await services.getEpubChapterContent(
+              book.localPath,
+              chapter.url || ''
+            );
+          }
         } else if (book.sourceId) {
           const source = await services.getBookSourceById(book.sourceId);
           if (source) {
@@ -197,8 +204,14 @@ export const useSourceStore = create<SourceState>((set, get) => ({
   },
 
   importSources: async (json) => {
-    const parsed = services.parseBookSourceJson(json);
-    const count = await services.importBookSources(parsed);
+    const { bookSources, rssSources } = services.parseBookSourceJson(json);
+    let count = 0;
+    if (bookSources.length > 0) {
+      count += await services.importBookSources(bookSources);
+    }
+    if (rssSources.length > 0) {
+      count += await services.importRssSources(rssSources);
+    }
     await get().loadSources();
     return count;
   },
@@ -210,6 +223,40 @@ export const useSourceStore = create<SourceState>((set, get) => ({
 
   deleteSource: async (id) => {
     await services.deleteBookSource(id);
+    await get().loadSources();
+  },
+}));
+
+// ==================== RSS Store ====================
+interface RssState {
+  sources: RssSource[];
+  loading: boolean;
+  loadSources: () => Promise<void>;
+  toggleSource: (id: string, enabled: boolean) => Promise<void>;
+  deleteSource: (id: string) => Promise<void>;
+}
+
+export const useRssStore = create<RssState>((set, get) => ({
+  sources: [],
+  loading: false,
+
+  loadSources: async () => {
+    set({ loading: true });
+    try {
+      const sources = await services.getAllRssSources();
+      set({ sources });
+    } finally {
+      set({ loading: false });
+    }
+  },
+
+  toggleSource: async (id, enabled) => {
+    await services.toggleRssSource(id, enabled);
+    await get().loadSources();
+  },
+
+  deleteSource: async (id) => {
+    await services.deleteRssSource(id);
     await get().loadSources();
   },
 }));
@@ -241,7 +288,8 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     set({ loading: true, results: [], searchingSources: [] });
 
     try {
-      const sources = await services.getEnabledBookSources();
+      const sources = await services.getSearchableBookSources();
+      console.log(`[Search] 找到 ${sources.length} 个可搜索书源`);
       const allResults: Partial<Book>[] = [];
 
       // 并发搜索所有书源

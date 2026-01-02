@@ -1,9 +1,18 @@
-import * as cheerio from 'cheerio';
+/**
+ * Source Parser - 书源解析服务
+ * 使用 AnalyzeRule 和 AnalyzeUrl 引擎实现 legado 风格规则解析
+ */
+
 import { BookSource, Book, BookChapter } from '../types';
 import { updateSourceRespondTime } from './bookSourceService';
+import { AnalyzeRule, analyzeUrl } from '../lib/ruleEngine';
 
-// HTTP请求
-const fetchWithTimeout = async (url: string, options: RequestInit = {}, timeout = 30000): Promise<string> => {
+// HTTP 请求封装
+export const fetchWithTimeout = async (
+  url: string, 
+  options: RequestInit = {}, 
+  timeout = 30000
+): Promise<string> => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
@@ -11,7 +20,8 @@ const fetchWithTimeout = async (url: string, options: RequestInit = {}, timeout 
     const response = await fetch(url, {
       ...options,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         ...options.headers,
       },
       signal: controller.signal,
@@ -24,209 +34,180 @@ const fetchWithTimeout = async (url: string, options: RequestInit = {}, timeout 
   }
 };
 
-// 规则解析器
-class RuleParser {
-  private $: cheerio.CheerioAPI;
-  private baseUrl: string;
-
-  constructor(html: string, baseUrl: string) {
-    this.$ = cheerio.load(html);
-    this.baseUrl = baseUrl;
+/**
+ * 搜索书籍
+ */
+export const searchBooks = async (
+  source: BookSource, 
+  keyword: string
+): Promise<Partial<Book>[]> => {
+  if (!source.searchUrl || !source.ruleSearch) {
+    console.log(`[Search] 书源 ${source.bookSourceName} 缺少 searchUrl 或 ruleSearch`);
+    return [];
   }
-
-  parseRule(rule: string | undefined, context?: cheerio.Cheerio<any>): string {
-    if (!rule) return '';
-
-    const element = context || this.$.root();
-
-    // 处理 || 分隔的多个规则
-    if (rule.includes('||')) {
-      for (const r of rule.split('||')) {
-        const result = this.parseRule(r.trim(), context);
-        if (result) return result;
-      }
-      return '';
-    }
-
-    // 处理 @css: 前缀
-    if (rule.startsWith('@css:')) {
-      rule = rule.substring(5);
-    }
-
-    // 处理属性获取
-    const attrMatch = rule.match(/@(\w+)$/);
-    let attr = 'text';
-    if (attrMatch) {
-      attr = attrMatch[1];
-      rule = rule.substring(0, rule.length - attrMatch[0].length).trim();
-    }
-
-    const el = rule ? element.find(rule) : element;
-    if (el.length === 0) return '';
-
-    let value = '';
-    switch (attr) {
-      case 'text': value = el.text().trim(); break;
-      case 'html': value = el.html() || ''; break;
-      default: value = el.attr(attr) || '';
-    }
-
-    // 处理相对URL
-    if ((attr === 'src' || attr === 'href') && value && !value.startsWith('http')) {
-      try {
-        value = new URL(value, this.baseUrl).href;
-      } catch {}
-    }
-
-    return value;
-  }
-
-  parseRuleList(rule: string | undefined): cheerio.Cheerio<any>[] {
-    if (!rule) return [];
-    if (rule.startsWith('@css:')) rule = rule.substring(5);
-
-    const elements = this.$(rule);
-    const result: cheerio.Cheerio<any>[] = [];
-    elements.each((_, el) => { result.push(this.$(el)); });
-    return result;
-  }
-
-  getAbsoluteUrl(url: string): string {
-    if (!url || url.startsWith('http')) return url;
-    try {
-      return new URL(url, this.baseUrl).href;
-    } catch {
-      return url;
-    }
-  }
-}
-
-// 搜索书籍
-export const searchBooks = async (source: BookSource, keyword: string): Promise<Partial<Book>[]> => {
-  if (!source.searchUrl || !source.ruleSearch) return [];
 
   const startTime = Date.now();
 
   try {
-    let url = source.searchUrl
-      .replace(/\{\{key\}\}/g, encodeURIComponent(keyword))
-      .replace(/\{\{page\}\}/g, '1');
+    // 使用 AnalyzeUrl 解析搜索 URL
+    const urlOptions = analyzeUrl(
+      source.searchUrl,
+      source.bookSourceUrl,
+      keyword,
+      1,
+      source.header
+    );
 
-    let options: RequestInit = {};
-    if (url.includes('@')) {
-      const [baseUrl, body] = url.split('@');
-      url = baseUrl;
-      options = {
-        method: 'POST',
-        body: body.replace(/\{\{key\}\}/g, encodeURIComponent(keyword)),
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      };
-    }
+    console.log(`[Search] 搜索 ${source.bookSourceName}: ${urlOptions.url}`);
+    console.log(`[Search] 方法: ${urlOptions.method}, body: ${urlOptions.body?.substring(0, 100)}`);
 
-    if (source.header) {
-      try {
-        options.headers = { ...options.headers, ...JSON.parse(source.header) };
-      } catch {}
-    }
-
-    const html = await fetchWithTimeout(url, options);
-    const parser = new RuleParser(html, source.bookSourceUrl);
+    const html = await fetchWithTimeout(urlOptions.url, {
+      method: urlOptions.method,
+      body: urlOptions.body,
+      headers: urlOptions.headers,
+    });
+    
+    console.log(`[Search] 获取到数据: ${html.substring(0, 200)}...`);
+    
+    // 使用 AnalyzeRule 解析结果
+    const analyzer = new AnalyzeRule(html, source.bookSourceUrl);
     const rule = source.ruleSearch;
 
+    console.log(`[Search] 使用规则: bookList=${rule.bookList}`);
+    
+    // 获取书籍列表元素
+    const bookElements = analyzer.getElements(rule.bookList);
+    console.log(`[Search] 找到 ${bookElements.length} 个结果`);
+    
     const books: Partial<Book>[] = [];
-    for (const el of parser.parseRuleList(rule.bookList)) {
+    
+    for (const elHtml of bookElements) {
+      const elAnalyzer = new AnalyzeRule(elHtml, source.bookSourceUrl);
+      
       const book: Partial<Book> = {
         sourceId: source.id,
         sourceName: source.bookSourceName,
-        name: parser.parseRule(rule.name, el),
-        author: parser.parseRule(rule.author, el),
-        intro: parser.parseRule(rule.intro, el),
-        kind: parser.parseRule(rule.kind, el),
-        latestChapterTitle: parser.parseRule(rule.lastChapter, el),
-        wordCount: parser.parseRule(rule.wordCount, el),
-        coverUrl: parser.getAbsoluteUrl(parser.parseRule(rule.coverUrl, el)),
-        bookUrl: parser.getAbsoluteUrl(parser.parseRule(rule.bookUrl, el)),
+        name: elAnalyzer.getString(rule.name),
+        author: elAnalyzer.getString(rule.author),
+        intro: elAnalyzer.getString(rule.intro),
+        kind: elAnalyzer.getString(rule.kind),
+        latestChapterTitle: elAnalyzer.getString(rule.lastChapter),
+        wordCount: elAnalyzer.getString(rule.wordCount),
+        coverUrl: elAnalyzer.getAbsoluteUrl(elAnalyzer.getString(rule.coverUrl)),
+        bookUrl: elAnalyzer.getAbsoluteUrl(elAnalyzer.getString(rule.bookUrl)),
       };
-      if (book.name && book.bookUrl) books.push(book);
+      
+      if (book.name && book.bookUrl) {
+        books.push(book);
+        console.log(`[Search] 解析到书籍: ${book.name} - ${book.author}`);
+      }
     }
 
     await updateSourceRespondTime(source.id, Date.now() - startTime);
     return books;
   } catch (error) {
-    console.error('搜索失败:', error);
+    console.error(`[Search] 搜索失败 ${source.bookSourceName}:`, error);
     return [];
   }
 };
 
-// 获取书籍详情
-export const getBookInfo = async (source: BookSource, bookUrl: string): Promise<Partial<Book> | null> => {
+/**
+ * 获取书籍详情
+ */
+export const getBookInfo = async (
+  source: BookSource, 
+  bookUrl: string
+): Promise<Partial<Book> | null> => {
   if (!source.ruleBookInfo) return null;
 
   try {
+    console.log(`[BookInfo] 获取详情: ${bookUrl}`);
     const html = await fetchWithTimeout(bookUrl);
-    const parser = new RuleParser(html, source.bookSourceUrl);
+    const analyzer = new AnalyzeRule(html, source.bookSourceUrl);
     const rule = source.ruleBookInfo;
 
     return {
       sourceId: source.id,
       sourceName: source.bookSourceName,
       bookUrl,
-      name: parser.parseRule(rule.name),
-      author: parser.parseRule(rule.author),
-      intro: parser.parseRule(rule.intro),
-      kind: parser.parseRule(rule.kind),
-      latestChapterTitle: parser.parseRule(rule.lastChapter),
-      wordCount: parser.parseRule(rule.wordCount),
-      coverUrl: parser.getAbsoluteUrl(parser.parseRule(rule.coverUrl)),
-      tocUrl: parser.getAbsoluteUrl(parser.parseRule(rule.tocUrl)) || bookUrl,
+      name: analyzer.getString(rule.name),
+      author: analyzer.getString(rule.author),
+      intro: analyzer.getString(rule.intro),
+      kind: analyzer.getString(rule.kind),
+      latestChapterTitle: analyzer.getString(rule.lastChapter),
+      wordCount: analyzer.getString(rule.wordCount),
+      coverUrl: analyzer.getAbsoluteUrl(analyzer.getString(rule.coverUrl)),
+      tocUrl: analyzer.getAbsoluteUrl(analyzer.getString(rule.tocUrl)) || bookUrl,
     };
   } catch (error) {
-    console.error('获取书籍信息失败:', error);
+    console.error('[BookInfo] 获取失败:', error);
     return null;
   }
 };
 
-// 获取目录
-export const getBookToc = async (source: BookSource, book: Book): Promise<BookChapter[]> => {
+/**
+ * 获取目录
+ */
+export const getBookToc = async (
+  source: BookSource, 
+  book: Book
+): Promise<BookChapter[]> => {
   if (!source.ruleToc) return [];
 
   try {
     const tocUrl = book.tocUrl || book.bookUrl;
+    console.log(`[Toc] 获取目录: ${tocUrl}`);
+    
     const html = await fetchWithTimeout(tocUrl);
-    const parser = new RuleParser(html, source.bookSourceUrl);
+    const analyzer = new AnalyzeRule(html, source.bookSourceUrl);
     const rule = source.ruleToc;
 
     const chapters: BookChapter[] = [];
-    parser.parseRuleList(rule.chapterList).forEach((el, index) => {
+    const chapterElements = analyzer.getElements(rule.chapterList);
+    
+    console.log(`[Toc] 找到 ${chapterElements.length} 章`);
+
+    chapterElements.forEach((elHtml, index) => {
+      const elAnalyzer = new AnalyzeRule(elHtml, source.bookSourceUrl);
+      
       const chapter: BookChapter = {
         id: `${book.id}_${index}`,
         bookId: book.id,
         index,
-        title: parser.parseRule(rule.chapterName, el),
-        url: parser.getAbsoluteUrl(parser.parseRule(rule.chapterUrl, el)),
+        title: elAnalyzer.getString(rule.chapterName),
+        url: elAnalyzer.getAbsoluteUrl(elAnalyzer.getString(rule.chapterUrl)),
       };
-      if (chapter.title && chapter.url) chapters.push(chapter);
+      
+      if (chapter.title && chapter.url) {
+        chapters.push(chapter);
+      }
     });
 
     return chapters;
   } catch (error) {
-    console.error('获取目录失败:', error);
+    console.error('[Toc] 获取失败:', error);
     return [];
   }
 };
 
-// 获取章节内容
-export const getChapterContent = async (source: BookSource, chapter: BookChapter): Promise<string> => {
+/**
+ * 获取章节内容
+ */
+export const getChapterContent = async (
+  source: BookSource, 
+  chapter: BookChapter
+): Promise<string> => {
   if (!source.ruleContent) return '';
 
   try {
+    console.log(`[Content] 获取正文: ${chapter.url}`);
     const html = await fetchWithTimeout(chapter.url);
-    const parser = new RuleParser(html, source.bookSourceUrl);
+    const analyzer = new AnalyzeRule(html, source.bookSourceUrl);
     const rule = source.ruleContent;
 
-    let content = parser.parseRule(rule.content);
+    let content = analyzer.getString(rule.content);
 
-    // 净化内容
+    // 净化 HTML 标签
     content = content
       .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<p>/gi, '\n')
@@ -244,52 +225,71 @@ export const getChapterContent = async (source: BookSource, chapter: BookChapter
       try {
         for (const r of rule.replaceRegex.split('##')) {
           const [pattern, replacement = ''] = r.split('@@');
-          if (pattern) content = content.replace(new RegExp(pattern, 'g'), replacement);
+          if (pattern) {
+            content = content.replace(new RegExp(pattern, 'g'), replacement);
+          }
         }
       } catch {}
     }
 
     return content;
   } catch (error) {
-    console.error('获取内容失败:', error);
+    console.error('[Content] 获取失败:', error);
     return '';
   }
 };
 
-// 发现页面
-export const exploreBooks = async (source: BookSource, url?: string): Promise<Partial<Book>[]> => {
+/**
+ * 发现页面
+ */
+export const exploreBooks = async (
+  source: BookSource, 
+  url?: string
+): Promise<Partial<Book>[]> => {
   if (!source.exploreUrl || !source.ruleExplore) return [];
 
   try {
+    // 解析发现 URL
     const exploreUrl = url || source.exploreUrl.split('::')[1]?.split('\n')[0] || source.exploreUrl;
+    console.log(`[Explore] 发现: ${exploreUrl}`);
+    
     const html = await fetchWithTimeout(exploreUrl);
-    const parser = new RuleParser(html, source.bookSourceUrl);
+    const analyzer = new AnalyzeRule(html, source.bookSourceUrl);
     const rule = source.ruleExplore;
 
     const books: Partial<Book>[] = [];
-    for (const el of parser.parseRuleList(rule.bookList)) {
+    const bookElements = analyzer.getElements(rule.bookList);
+
+    for (const elHtml of bookElements) {
+      const elAnalyzer = new AnalyzeRule(elHtml, source.bookSourceUrl);
+      
       const book: Partial<Book> = {
         sourceId: source.id,
         sourceName: source.bookSourceName,
-        name: parser.parseRule(rule.name, el),
-        author: parser.parseRule(rule.author, el),
-        intro: parser.parseRule(rule.intro, el),
-        kind: parser.parseRule(rule.kind, el),
-        latestChapterTitle: parser.parseRule(rule.lastChapter, el),
-        coverUrl: parser.getAbsoluteUrl(parser.parseRule(rule.coverUrl, el)),
-        bookUrl: parser.getAbsoluteUrl(parser.parseRule(rule.bookUrl, el)),
+        name: elAnalyzer.getString(rule.name),
+        author: elAnalyzer.getString(rule.author),
+        intro: elAnalyzer.getString(rule.intro),
+        kind: elAnalyzer.getString(rule.kind),
+        latestChapterTitle: elAnalyzer.getString(rule.lastChapter),
+        coverUrl: elAnalyzer.getAbsoluteUrl(elAnalyzer.getString(rule.coverUrl)),
+        bookUrl: elAnalyzer.getAbsoluteUrl(elAnalyzer.getString(rule.bookUrl)),
       };
-      if (book.name && book.bookUrl) books.push(book);
+      
+      if (book.name && book.bookUrl) {
+        books.push(book);
+      }
     }
 
     return books;
   } catch (error) {
-    console.error('发现失败:', error);
+    console.error('[Explore] 发现失败:', error);
     return [];
   }
 };
 
-// 解析发现分类
+/**
+ * 解析发现分类
+ */
 export const parseExploreKinds = (exploreUrl: string): { name: string; url: string }[] => {
   return exploreUrl.split('\n')
     .map(line => {

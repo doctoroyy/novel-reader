@@ -1,65 +1,73 @@
 import React, { useEffect, useState } from 'react';
 import {
-  View, Text, FlatList, TouchableOpacity, StyleSheet, RefreshControl, Alert
+  View, Text, FlatList, TouchableOpacity, StyleSheet, RefreshControl, Alert, ActivityIndicator
 } from 'react-native';
 import { Stack } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { RssSource, RssArticle } from '../../src/types';
-import {
-  getAllRssSources, addRssSource, deleteRssSource,
-  getArticlesBySource, fetchRssFeed, markArticleRead
-} from '../../src/services';
+import { useRssStore } from '../../src/stores';
+import { fetchRssFeed, getArticlesBySource, markArticleRead, addRssSource } from '../../src/services';
+
+const THEME_COLOR = '#667eea';
 
 export default function RssScreen() {
-  const [sources, setSources] = useState<RssSource[]>([]);
+  const { sources, loading, loadSources, deleteSource } = useRssStore();
   const [selectedSource, setSelectedSource] = useState<RssSource | null>(null);
   const [articles, setArticles] = useState<RssArticle[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
     loadSources();
   }, []);
 
-  const loadSources = async () => {
-    const list = await getAllRssSources();
-    setSources(list);
-    if (list.length > 0 && !selectedSource) {
-      selectSource(list[0]);
+  useEffect(() => {
+    if (sources.length > 0 && !selectedSource) {
+      handleSourceSelect(sources[0]);
     }
-  };
+  }, [sources]);
 
-  const selectSource = async (source: RssSource) => {
+  const handleSourceSelect = async (source: RssSource) => {
     setSelectedSource(source);
-    setLoading(true);
+    setRefreshing(true);
     try {
       const list = await getArticlesBySource(source.id);
       setArticles(list);
+      
+      // 如果没有文章，自动刷一次
+      if (list.length === 0) {
+        await handleRefresh(source);
+      }
     } finally {
-      setLoading(false);
+      setRefreshing(false);
     }
   };
 
-  const refreshFeed = async () => {
-    if (!selectedSource) return;
-    setLoading(true);
+  const handleRefresh = async (sourceOverride?: RssSource) => {
+    const source = sourceOverride || selectedSource;
+    if (!source) return;
+    
+    setRefreshing(true);
     try {
-      await fetchRssFeed(selectedSource);
-      const list = await getArticlesBySource(selectedSource.id);
+      await fetchRssFeed(source);
+      const list = await getArticlesBySource(source.id);
       setArticles(list);
+    } catch (error) {
+      console.error('刷新失败:', error);
+      Alert.alert('刷新失败', '请检查网络或订阅源地址');
     } finally {
-      setLoading(false);
+      setRefreshing(false);
     }
   };
 
   const handleAddSource = () => {
     Alert.prompt(
-      '添加RSS源',
-      '请输入RSS源地址',
+      '添加订阅源',
+      '请输入 RSS 订阅源地址',
       async (url) => {
         if (url) {
           try {
             await addRssSource({
-              sourceName: url.split('/')[2] || 'RSS',
+              sourceName: url.split('/')[2] || '新订阅',
               sourceUrl: url,
             });
             await loadSources();
@@ -68,9 +76,7 @@ export default function RssScreen() {
           }
         }
       },
-      'plain-text',
-      '',
-      'url'
+      'plain-text'
     );
   };
 
@@ -84,12 +90,11 @@ export default function RssScreen() {
           text: '删除',
           style: 'destructive',
           onPress: async () => {
-            await deleteRssSource(source.id);
+            await deleteSource(source.id);
             if (selectedSource?.id === source.id) {
               setSelectedSource(null);
               setArticles([]);
             }
-            await loadSources();
           },
         },
       ]
@@ -97,157 +102,208 @@ export default function RssScreen() {
   };
 
   const handleArticlePress = async (article: RssArticle) => {
-    await markArticleRead(article.id);
-    // 打开文章详情或外部链接
+    if (!article.isRead) {
+      await markArticleRead(article.id);
+      setArticles(prev => prev.map(a => a.id === article.id ? { ...a, isRead: true } : a));
+    }
+    // TODO: 实现内容查看器或打开外部浏览器
+    Alert.alert('提示', '正文查看器开发中，稍后复刻 Legado 的正文解析功能');
   };
 
   const renderArticle = ({ item }: { item: RssArticle }) => (
     <TouchableOpacity
       style={[styles.articleItem, item.isRead && styles.articleRead]}
       onPress={() => handleArticlePress(item)}
+      activeOpacity={0.7}
     >
-      <Text style={[styles.articleTitle, item.isRead && styles.articleTitleRead]} numberOfLines={2}>
-        {item.title}
-      </Text>
+      <View style={styles.articleHeader}>
+        <Text style={[styles.articleTitle, item.isRead && styles.articleTitleRead]} numberOfLines={2}>
+          {item.title}
+        </Text>
+      </View>
       {item.description && (
-        <Text style={styles.articleDesc} numberOfLines={2}>{item.description}</Text>
+        <Text style={styles.articleDesc} numberOfLines={3}>
+          {item.description.replace(/<[^>]+>/g, '').trim()}
+        </Text>
       )}
-      <Text style={styles.articleDate}>{item.pubDate}</Text>
+      <View style={styles.articleFooter}>
+        <Text style={styles.articleDate}>{item.pubDate || '未知日期'}</Text>
+        {item.isStarred && <Ionicons name="star" size={14} color="#ffd700" />}
+      </View>
     </TouchableOpacity>
   );
 
   return (
-    <>
+    <View style={styles.container}>
       <Stack.Screen
         options={{
-          title: '订阅',
+          headerTitle: '综合订阅',
           headerRight: () => (
-            <TouchableOpacity onPress={handleAddSource}>
-              <Ionicons name="add" size={24} color="#007AFF" />
+            <TouchableOpacity onPress={handleAddSource} style={{ padding: 8 }}>
+              <Ionicons name="add" size={24} color={THEME_COLOR} />
             </TouchableOpacity>
           ),
         }}
       />
-      <View style={styles.container}>
-        {/* RSS源列表 */}
-        {sources.length > 0 && (
-          <View style={styles.sourceRow}>
-            <FlatList
-              horizontal
-              data={sources}
-              keyExtractor={(item) => item.id}
-              showsHorizontalScrollIndicator={false}
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={[
-                    styles.sourceChip,
-                    selectedSource?.id === item.id && styles.sourceChipActive,
-                  ]}
-                  onPress={() => selectSource(item)}
-                  onLongPress={() => handleDeleteSource(item)}
-                >
-                  <Text
-                    style={[
-                      styles.sourceChipText,
-                      selectedSource?.id === item.id && styles.sourceChipTextActive,
-                    ]}
-                    numberOfLines={1}
-                  >
-                    {item.sourceName}
-                  </Text>
-                </TouchableOpacity>
-              )}
-            />
-          </View>
-        )}
 
-        {/* 文章列表 */}
+      {/* 源列表 */}
+      <View style={styles.sourceBar}>
         <FlatList
-          data={articles}
-          renderItem={renderArticle}
+          horizontal
+          data={sources}
           keyExtractor={(item) => item.id}
-          contentContainerStyle={styles.listContent}
-          refreshControl={
-            <RefreshControl refreshing={loading} onRefresh={refreshFeed} />
-          }
-          ListEmptyComponent={
-            <View style={styles.empty}>
-              <Ionicons name="newspaper-outline" size={48} color="#ccc" />
-              <Text style={styles.emptyText}>
-                {sources.length === 0 ? '点击右上角添加订阅源' : '暂无文章'}
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.sourceListContent}
+          renderItem={({ item }) => (
+            <TouchableOpacity
+              style={[
+                styles.sourceChip,
+                selectedSource?.id === item.id && styles.sourceChipActive,
+              ]}
+              onPress={() => handleSourceSelect(item)}
+              onLongPress={() => handleDeleteSource(item)}
+            >
+              <Text
+                style={[
+                  styles.sourceChipText,
+                  selectedSource?.id === item.id && styles.sourceChipTextActive,
+                ]}
+                numberOfLines={1}
+              >
+                {item.sourceName}
               </Text>
-            </View>
+            </TouchableOpacity>
+          )}
+          ListEmptyComponent={
+            <Text style={styles.emptySources}>暂无订阅源</Text>
           }
         />
       </View>
-    </>
+
+      {/* 文章列表 */}
+      <FlatList
+        data={articles}
+        renderItem={renderArticle}
+        keyExtractor={(item) => item.id}
+        contentContainerStyle={styles.articleList}
+        refreshControl={
+          <RefreshControl 
+            refreshing={refreshing} 
+            onRefresh={handleRefresh}
+            colors={[THEME_COLOR]}
+            tintColor={THEME_COLOR}
+          />
+        }
+        ListEmptyComponent={
+          <View style={styles.emptyContent}>
+            {loading && !refreshing ? (
+              <ActivityIndicator color={THEME_COLOR} />
+            ) : (
+              <>
+                <Ionicons name="newspaper-outline" size={64} color="#e0e0e0" />
+                <Text style={styles.emptyText}>
+                  {sources.length === 0 ? '导入或添加订阅源开始阅读' : '暂无内容，下拉刷新'}
+                </Text>
+              </>
+            )}
+          </View>
+        }
+      />
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: '#f8f9fa',
   },
-  sourceRow: {
+  sourceBar: {
     backgroundColor: '#fff',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderBottomWidth: 1,
+    borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: '#e0e0e0',
+    paddingVertical: 10,
+  },
+  sourceListContent: {
+    paddingHorizontal: 12,
   },
   sourceChip: {
-    paddingHorizontal: 14,
+    paddingHorizontal: 16,
     paddingVertical: 6,
-    borderRadius: 16,
-    backgroundColor: '#f0f0f0',
+    borderRadius: 20,
+    backgroundColor: '#f0f2f5',
     marginRight: 8,
-    maxWidth: 120,
+    borderWidth: 1,
+    borderColor: 'transparent',
   },
   sourceChipActive: {
-    backgroundColor: '#007AFF',
+    backgroundColor: `${THEME_COLOR}15`,
+    borderColor: THEME_COLOR,
   },
   sourceChipText: {
     fontSize: 13,
     color: '#666',
+    fontWeight: '500',
   },
   sourceChipTextActive: {
-    color: '#fff',
+    color: THEME_COLOR,
+    fontWeight: '700',
   },
-  listContent: {
+  emptySources: {
+    fontSize: 13,
+    color: '#999',
+    paddingHorizontal: 16,
+    paddingVertical: 4,
+  },
+  articleList: {
     padding: 12,
     flexGrow: 1,
   },
   articleItem: {
     backgroundColor: '#fff',
-    borderRadius: 8,
-    padding: 12,
-    marginBottom: 10,
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
   },
   articleRead: {
-    opacity: 0.7,
+    opacity: 0.6,
+  },
+  articleHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 8,
   },
   articleTitle: {
-    fontSize: 15,
-    fontWeight: '500',
-    color: '#333',
-    lineHeight: 22,
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1a1a2e',
+    lineHeight: 24,
   },
   articleTitleRead: {
-    color: '#999',
+    fontWeight: '400',
+    color: '#666',
   },
   articleDesc: {
-    fontSize: 13,
+    fontSize: 14,
     color: '#666',
-    marginTop: 6,
-    lineHeight: 18,
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+  articleFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
   articleDate: {
-    fontSize: 11,
+    fontSize: 12,
     color: '#999',
-    marginTop: 8,
   },
-  empty: {
+  emptyContent: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
@@ -256,6 +312,8 @@ const styles = StyleSheet.create({
   emptyText: {
     fontSize: 14,
     color: '#999',
-    marginTop: 12,
+    marginTop: 16,
+    textAlign: 'center',
+    paddingHorizontal: 40,
   },
 });

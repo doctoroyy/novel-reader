@@ -1,16 +1,22 @@
 import { v4 as uuidv4 } from 'uuid';
 import { RssSource, RssArticle } from '../types';
 import { queryAll, queryFirst, execute } from './database';
+import { AnalyzeRule, analyzeUrl } from '../lib/ruleEngine';
+import { fetchWithTimeout } from './sourceParser';
 
 // ==================== RSS源操作 ====================
-export const addRssSource = async (source: Partial<RssSource>): Promise<RssSource> => {
+export const addRssSource = async (source: Partial<RssSource> & Record<string, any>): Promise<RssSource> => {
   const now = Date.now();
+  
+  // 兼容 legado 格式
+  const id = source.id || source.sourceUrl || uuidv4();
+  
   const newSource: RssSource = {
-    id: source.id || uuidv4(),
-    sourceName: source.sourceName || '',
-    sourceUrl: source.sourceUrl || '',
-    sourceIcon: source.sourceIcon,
-    sourceGroup: source.sourceGroup,
+    id,
+    sourceName: source.sourceName || source.bookSourceName || '未命名订阅源',
+    sourceUrl: source.sourceUrl || source.bookSourceUrl || '',
+    sourceIcon: source.sourceIcon || '',
+    sourceGroup: source.sourceGroup || source.bookSourceGroup,
     enabled: source.enabled !== false,
     customOrder: source.customOrder || 0,
     lastUpdateTime: source.lastUpdateTime || now,
@@ -29,14 +35,29 @@ export const addRssSource = async (source: Partial<RssSource>): Promise<RssSourc
       lastUpdateTime, ruleArticles, ruleTitle, rulePubDate, ruleDescription,
       ruleImage, ruleLink, ruleContent)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [newSource.id, newSource.sourceName, newSource.sourceUrl, newSource.sourceIcon,
-     newSource.sourceGroup, newSource.enabled ? 1 : 0, newSource.customOrder,
-     newSource.lastUpdateTime, newSource.ruleArticles, newSource.ruleTitle,
-     newSource.rulePubDate, newSource.ruleDescription, newSource.ruleImage,
-     newSource.ruleLink, newSource.ruleContent]
+    [
+      newSource.id, newSource.sourceName, newSource.sourceUrl, newSource.sourceIcon,
+      newSource.sourceGroup, newSource.enabled ? 1 : 0, newSource.customOrder,
+      newSource.lastUpdateTime, newSource.ruleArticles, newSource.ruleTitle,
+      newSource.rulePubDate, newSource.ruleDescription, newSource.ruleImage,
+      newSource.ruleLink, newSource.ruleContent,
+    ]
   );
 
   return newSource;
+};
+
+export const importRssSources = async (sources: Partial<RssSource>[]): Promise<number> => {
+  let count = 0;
+  for (const source of sources) {
+    try {
+      await addRssSource(source);
+      count++;
+    } catch (error) {
+      console.error('导入订阅源失败:', source.sourceName, error);
+    }
+  }
+  return count;
 };
 
 export const getAllRssSources = async (): Promise<RssSource[]> => {
@@ -59,6 +80,13 @@ export const getRssSourceById = async (id: string): Promise<RssSource | null> =>
 export const deleteRssSource = async (id: string): Promise<void> => {
   await execute('DELETE FROM rss_articles WHERE sourceId = ?', [id]);
   await execute('DELETE FROM rss_sources WHERE id = ?', [id]);
+};
+
+export const toggleRssSource = async (id: string, enabled: boolean): Promise<void> => {
+  await execute(
+    'UPDATE rss_sources SET enabled = ?, lastUpdateTime = ? WHERE id = ?',
+    [enabled ? 1 : 0, Date.now(), id]
+  );
 };
 
 // ==================== 文章操作 ====================
@@ -115,11 +143,27 @@ export const toggleArticleStar = async (id: string, starred: boolean): Promise<v
 // ==================== 抓取RSS ====================
 export const fetchRssFeed = async (source: RssSource): Promise<RssArticle[]> => {
   try {
-    const response = await fetch(source.sourceUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
+    console.log(`[RSS] 抓取订阅源: ${source.sourceName} (${source.sourceUrl})`);
+    
+    // 使用 analyzeUrl 解析（处理动态参数）
+    const urlOptions = analyzeUrl(source.sourceUrl, source.sourceUrl);
+    
+    const text = await fetchWithTimeout(urlOptions.url, {
+      method: urlOptions.method,
+      body: urlOptions.body,
+      headers: urlOptions.headers,
     });
-    const text = await response.text();
-    const articles = parseRssFeed(source.id, text);
+
+    let articles: Partial<RssArticle>[] = [];
+
+    // 判断是标准 RSS 还是有规则的
+    if (source.ruleArticles) {
+      console.log(`[RSS] 使用规则解析: ${source.sourceName}`);
+      articles = parseRssByRules(source, text);
+    } else {
+      console.log(`[RSS] 使用标准 XML 解析: ${source.sourceName}`);
+      articles = parseRssFeed(source.id, text);
+    }
 
     await execute(
       'UPDATE rss_sources SET lastUpdateTime = ? WHERE id = ?',
@@ -127,6 +171,8 @@ export const fetchRssFeed = async (source: RssSource): Promise<RssArticle[]> => 
     );
 
     for (const article of articles) {
+      if (!article.link) continue;
+      
       const existing = await queryFirst<any>(
         'SELECT id FROM rss_articles WHERE link = ?',
         [article.link]
@@ -139,6 +185,35 @@ export const fetchRssFeed = async (source: RssSource): Promise<RssArticle[]> => 
     console.error('抓取RSS失败:', error);
     return [];
   }
+};
+
+const parseRssByRules = (source: RssSource, content: string): Partial<RssArticle>[] => {
+  const articles: Partial<RssArticle>[] = [];
+  const analyzer = new AnalyzeRule(content, source.sourceUrl);
+  
+  const articleElements = analyzer.getElements(source.ruleArticles);
+  console.log(`[RSS] 找到元素: ${articleElements.length}`);
+
+  for (const elHtml of articleElements) {
+    const elAnalyzer = new AnalyzeRule(elHtml, source.sourceUrl);
+    
+    const article: Partial<RssArticle> = {
+      sourceId: source.id,
+      title: elAnalyzer.getString(source.ruleTitle),
+      link: elAnalyzer.getAbsoluteUrl(elAnalyzer.getString(source.ruleLink)),
+      description: elAnalyzer.getString(source.ruleDescription),
+      pubDate: elAnalyzer.getString(source.rulePubDate),
+      image: elAnalyzer.getAbsoluteUrl(elAnalyzer.getString(source.ruleImage)),
+      content: source.ruleContent ? elAnalyzer.getString(source.ruleContent) : undefined,
+      createTime: Date.now(),
+    };
+
+    if (article.title && article.link) {
+      articles.push(article);
+    }
+  }
+
+  return articles;
 };
 
 const parseRssFeed = (sourceId: string, xml: string): Partial<RssArticle>[] => {

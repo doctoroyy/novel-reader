@@ -33,46 +33,74 @@ export interface ParsedEpub {
   contents: Map<string, string>;
 }
 
+import { Buffer } from 'buffer';
+import JSZip from 'jszip';
+
 /**
  * Base64 解码 (React Native 兼容)
  */
-const base64Decode = (str: string): Uint8Array => {
-  const binaryString = atob(str);
-  const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-  return bytes;
+const base64ToBuffer = (str: string): Buffer => {
+  return Buffer.from(str, 'base64');
 };
 
 /**
- * 简单的 ZIP 解析 (不依赖 JSZip)
- * 注意：这是一个简化版本，适用于标准 EPUB
+ * 解析 EPUB 文件
  */
 export const parseEpubFile = async (filePath: string): Promise<ParsedEpub | null> => {
   try {
-    // 读取文件为 base64
     const base64Content = await FileSystem.readAsStringAsync(filePath, {
       encoding: FileSystem.EncodingType.Base64,
     });
 
-    // 由于 React Native 环境限制，这里提供一个简化的实现
-    // 实际项目中需要使用 react-native-zip-archive 或 native module
+    const buffer = base64ToBuffer(base64Content);
+    const zip = await JSZip.loadAsync(buffer);
 
-    console.warn('EPUB 解析需要原生 ZIP 库支持，当前使用简化模式');
+    // 1. 找到 OPF 文件路径
+    const containerXml = await zip.file('META-INF/container.xml')?.async('string');
+    if (!containerXml) throw new Error('Invalid EPUB: Missing container.xml');
 
-    // 返回默认结构
-    const fileName = filePath.split('/').pop() || 'Unknown';
-    const bookName = fileName.replace(/\.epub$/i, '');
+    const container$ = cheerio.load(containerXml, { xmlMode: true });
+    const opfPath = container$('rootfile').attr('full-path');
+    if (!opfPath) throw new Error('Invalid EPUB: Missing OPF path');
 
-    return {
-      metadata: {
-        title: bookName,
-        author: '未知',
-      },
-      toc: [],
-      contents: new Map(),
-    };
+    const opfDir = opfPath.includes('/') ? opfPath.substring(0, opfPath.lastIndexOf('/') + 1) : '';
+    const opfContent = await zip.file(opfPath)?.async('string');
+    if (!opfContent) throw new Error('Invalid EPUB: Missing OPF content');
+
+    // 2. 解析元数据
+    const metadata = parseOpfMetadata(opfContent);
+
+    // 3. 解析目录
+    const opf$ = cheerio.load(opfContent, { xmlMode: true });
+    
+    // 尝试从 manifest 找到 TOC 文件 (ncx 或 nav)
+    let toc: EpubTocItem[] = [];
+    const ncxId = opf$('spine').attr('toc');
+    const ncxItem = ncxId ? opf$(`item#${ncxId}`).attr('href') : opf$('item[media-type="application/x-dtbncx+xml"]').attr('href');
+    const navItem = opf$('item[properties~="nav"]').attr('href');
+
+    if (navItem) {
+      const navContent = await zip.file(opfDir + navItem)?.async('string');
+      if (navContent) toc = parseNavToc(navContent);
+    } 
+    
+    if (toc.length === 0 && ncxItem) {
+      const ncxContent = await zip.file(opfDir + ncxItem)?.async('string');
+      if (ncxContent) toc = parseNcxToc(ncxContent);
+    }
+
+    // 补全 href 路径 (相对 OPF)
+    toc = toc.map(item => ({
+      ...item,
+      href: opfDir + item.href.split('#')[0], // 移除锚点
+    }));
+
+    // 4. 提取内容流 (Map)
+    const contents = new Map<string, string>();
+    // 我们暂时不预加载所有内容，而是在阅读时按需加载
+    // 但为了兼容结构，保留此字段
+
+    return { metadata, toc, contents };
   } catch (error) {
     console.error('EPUB 解析失败:', error);
     return null;
@@ -86,11 +114,11 @@ export const parseOpfMetadata = (opfContent: string): EpubMetadata => {
   const $ = cheerio.load(opfContent, { xmlMode: true });
   
   return {
-    title: $('dc\\:title, title').first().text() || undefined,
-    author: $('dc\\:creator, creator').first().text() || undefined,
-    description: $('dc\\:description, description').first().text() || undefined,
-    publisher: $('dc\\:publisher, publisher').first().text() || undefined,
-    language: $('dc\\:language, language').first().text() || undefined,
+    title: $('dc\\:title').text() || $('title').text() || '未知书名',
+    author: $('dc\\:creator').text() || $('creator').text() || '未知作者',
+    description: $('dc\\:description').text() || $('description').text(),
+    publisher: $('dc\\:publisher').text() || $('publisher').text(),
+    language: $('dc\\:language').text() || $('language').text(),
   };
 };
 
@@ -168,41 +196,86 @@ export const cleanHtmlContent = (html: string): string => {
 };
 
 /**
+ * 获取 EPUB 章节内容
+ */
+export const getEpubChapterContent = async (
+  filePath: string,
+  href: string
+): Promise<string> => {
+  try {
+    const base64Content = await FileSystem.readAsStringAsync(filePath, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+
+    const buffer = Buffer.from(base64Content, 'base64');
+    const zip = await JSZip.loadAsync(buffer);
+    
+    const fileContent = await zip.file(href)?.async('string');
+    if (!fileContent) return '章节内容丢失';
+
+    return cleanHtmlContent(fileContent);
+  } catch (error) {
+    console.error('获取 EPUB 内容失败:', error);
+    return '解析内容失败';
+  }
+};
+
+/**
  * 导入 EPUB 文件到书架
  */
-export const importEpubToShelf = async (filePath: string): Promise<Book | null> => {
-  const parsed = await parseEpubFile(filePath);
-  if (!parsed) return null;
+export const importEpubToShelf = async (uri: string): Promise<Book | null> => {
+  try {
+    const fileName = uri.split('/').pop() || `book_${Date.now()}.epub`;
+    const bookId = uuidv4();
+    const documentDirectory = FileSystem.documentDirectory || '';
+    const localDir = `${documentDirectory}books/`;
+    const localPath = `${localDir}${bookId}.epub`;
 
-  const { metadata, toc } = parsed;
+    // 1. 确保目录存在
+    await FileSystem.makeDirectoryAsync(localDir, { intermediates: true });
 
-  // 保存书籍
-  const book = await addBook({
-    name: metadata.title || 'Unknown',
-    author: metadata.author || '未知',
-    intro: metadata.description,
-    type: BookType.LOCAL_EPUB,
-    isLocal: true,
-    localPath: filePath,
-    totalChapterNum: toc.length,
-    createTime: Date.now(),
-    updateTime: Date.now(),
-  });
+    // 2. 复制文件到本地存储 (防止 temporary URI 失效)
+    await FileSystem.copyAsync({ from: uri, to: localPath });
 
-  // 保存章节
-  const chapters: BookChapter[] = toc.map((item, idx) => ({
-    id: `${book.id}_${idx}`,
-    bookId: book.id,
-    index: idx,
-    title: item.title,
-    url: item.href,
-  }));
+    // 3. 解析文件
+    const parsed = await parseEpubFile(localPath);
+    if (!parsed) return null;
 
-  if (chapters.length > 0) {
-    await addChapters(chapters);
+    const { metadata, toc } = parsed;
+
+    // 4. 保存书籍
+    const book = await addBook({
+      id: bookId,
+      name: metadata.title || fileName.replace(/\.epub$/i, ''),
+      author: metadata.author || '未知',
+      intro: metadata.description,
+      type: BookType.LOCAL_EPUB,
+      isLocal: true,
+      localPath: localPath,
+      totalChapterNum: toc.length,
+      createTime: Date.now(),
+      updateTime: Date.now(),
+      bookUrl: `local://${bookId}`,
+    });
+
+    // 5. 保存章节
+    const chapters: BookChapter[] = toc.map((item, idx) => ({
+      id: `${book.id}_${idx}`,
+      bookId: book.id,
+      index: idx,
+      title: item.title,
+      url: item.href,
+    }));
+
+    if (chapters.length > 0) {
+      await addChapters(chapters);
+    }
+
+    return book;
+  } catch (error) {
+    console.error('导入 EPUB 失败:', error);
+    return null;
   }
-
-  return book;
 };
 
 export default {
@@ -212,4 +285,5 @@ export default {
   parseNavToc,
   cleanHtmlContent,
   importEpubToShelf,
+  getEpubChapterContent,
 };

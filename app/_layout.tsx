@@ -1,3 +1,6 @@
+// 必须在最开始导入以支持 uuid
+import 'react-native-get-random-values';
+
 import { useEffect, useState } from 'react';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';

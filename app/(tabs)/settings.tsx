@@ -9,7 +9,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useSourceStore } from '../../src/stores';
 import {
-  getAllReplaceRules, importReplaceRules
+  getAllReplaceRules, importReplaceRules, deleteAllBookSources
 } from '../../src/services';
 
 export default function SettingsScreen() {
@@ -76,6 +76,25 @@ export default function SettingsScreen() {
     } catch (error) {
       Alert.alert('导入失败', '请确保文件格式正确');
     }
+  };
+
+  const handleClearAllSources = () => {
+    Alert.alert(
+      '清空书源',
+      `确定要删除全部 ${sources.length} 个书源吗？此操作不可恢复！`,
+      [
+        { text: '取消', style: 'cancel' },
+        {
+          text: '清空',
+          style: 'destructive',
+          onPress: async () => {
+            await deleteAllBookSources();
+            await loadSources();
+            Alert.alert('成功', '已清空所有书源，请重新导入');
+          },
+        },
+      ]
+    );
   };
 
   const MenuItem = ({ 
@@ -167,6 +186,13 @@ export default function SettingsScreen() {
             iconColor="#43e97b"
             title="本地导入"
             onPress={handleImportBookSources}
+          />
+          <MenuItem
+            icon="trash"
+            iconColor="#ff3b30"
+            title="清空书源"
+            subtitle="删除全部书源后重新导入"
+            onPress={handleClearAllSources}
           />
         </View>
 

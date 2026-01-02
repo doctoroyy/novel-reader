@@ -1,16 +1,21 @@
 import { v4 as uuidv4 } from 'uuid';
-import { BookSource } from '../types';
+import { BookSource, RssSource } from '../types';
 import { queryAll, queryFirst, execute } from './database';
+import { importRssSources } from './rssService';
 
 // ==================== 书源操作 ====================
-export const addBookSource = async (source: Partial<BookSource>): Promise<BookSource> => {
+export const addBookSource = async (source: Partial<BookSource> & Record<string, any>): Promise<BookSource> => {
   const now = Date.now();
+  
+  // 兼容 legado 书源格式：bookSourceUrl 作为主键
+  const id = source.id || source.bookSourceUrl || uuidv4();
+  
   const newSource: BookSource = {
-    id: source.id || uuidv4(),
-    bookSourceName: source.bookSourceName || '',
-    bookSourceGroup: source.bookSourceGroup,
-    bookSourceUrl: source.bookSourceUrl || '',
-    bookSourceComment: source.bookSourceComment,
+    id,
+    bookSourceName: source.bookSourceName || source.sourceName || '未命名书源',
+    bookSourceGroup: source.bookSourceGroup || source.sourceGroup,
+    bookSourceUrl: source.bookSourceUrl || source.sourceUrl || '',
+    bookSourceComment: source.bookSourceComment || source.sourceComment,
     enabled: source.enabled !== false,
     enabledExplore: source.enabledExplore !== false,
     weight: source.weight || 0,
@@ -52,14 +57,29 @@ export const addBookSource = async (source: Partial<BookSource>): Promise<BookSo
 
 export const importBookSources = async (sources: Partial<BookSource>[]): Promise<number> => {
   let count = 0;
+  console.log(`[Import] 开始导入 ${sources.length} 个书源`);
+  
   for (const source of sources) {
     try {
+      // 调试：打印前3个书源的关键字段
+      if (count < 3) {
+        console.log(`[Import] 书源 #${count + 1} 原始数据:`, JSON.stringify({
+          bookSourceName: source.bookSourceName,
+          bookSourceUrl: source.bookSourceUrl,
+          searchUrl: source.searchUrl,
+          hasRuleSearch: !!source.ruleSearch,
+          allKeys: Object.keys(source as any).slice(0, 20).join(', ')
+        }));
+      }
+      
       await addBookSource(source);
       count++;
     } catch (error) {
       console.error('导入书源失败:', source.bookSourceName, error);
     }
   }
+  
+  console.log(`[Import] 成功导入 ${count}/${sources.length} 个书源`);
   return count;
 };
 
@@ -73,6 +93,18 @@ export const getAllBookSources = async (): Promise<BookSource[]> => {
 export const getEnabledBookSources = async (): Promise<BookSource[]> => {
   const rows = await queryAll<any>(
     'SELECT * FROM book_sources WHERE enabled = 1 ORDER BY customOrder ASC, weight DESC'
+  );
+  return rows.map(mapRowToSource);
+};
+
+// 获取可搜索的书源（有 searchUrl 且已启用）
+export const getSearchableBookSources = async (): Promise<BookSource[]> => {
+  const rows = await queryAll<any>(
+    `SELECT * FROM book_sources 
+     WHERE enabled = 1 
+       AND searchUrl IS NOT NULL 
+       AND searchUrl != '' 
+     ORDER BY customOrder ASC, weight DESC`
   );
   return rows.map(mapRowToSource);
 };
@@ -115,6 +147,10 @@ export const deleteBookSources = async (ids: string[]): Promise<void> => {
   }
 };
 
+export const deleteAllBookSources = async (): Promise<void> => {
+  await execute('DELETE FROM book_sources');
+};
+
 export const updateSourceRespondTime = async (id: string, respondTime: number): Promise<void> => {
   await execute('UPDATE book_sources SET respondTime = ? WHERE id = ?', [respondTime, id]);
 };
@@ -123,13 +159,47 @@ export const exportBookSources = (sources: BookSource[]): string => {
   return JSON.stringify(sources, null, 2);
 };
 
-export const parseBookSourceJson = (json: string): Partial<BookSource>[] => {
+export interface CategorizedSources {
+  bookSources: Partial<BookSource>[];
+  rssSources: Partial<RssSource>[];
+}
+
+export const parseBookSourceJson = (json: string): CategorizedSources => {
+  const result: CategorizedSources = {
+    bookSources: [],
+    rssSources: [],
+  };
+
   try {
     const data = JSON.parse(json);
-    return Array.isArray(data) ? data : [data];
-  } catch {
-    return [];
+    const sources = Array.isArray(data) ? data : [data];
+    
+    for (const source of sources) {
+      // 检测是否是书源
+      const isBookSource = 
+        source.bookSourceUrl ||  // legado 书源格式
+        source.searchUrl ||      // 有搜索 URL
+        source.ruleSearch;       // 有搜索规则
+      
+      // 检测是否是 RSS 源
+      const isRssSource = 
+        source.ruleArticles ||   // RSS 有文章规则
+        source.sortUrl ||        // RSS 有分类 URL
+        (source.sourceUrl && !source.bookSourceUrl && !source.searchUrl);
+      
+      if (isBookSource) {
+        result.bookSources.push(source);
+      } else if (isRssSource) {
+        result.rssSources.push(source);
+      } else {
+        console.log(`[Import] 跳过无效源: ${source.bookSourceName || source.sourceName || '未命名'}`);
+      }
+    }
+  } catch (e) {
+    console.error('[Import] JSON 解析失败:', e);
   }
+  
+  return result;
 };
 
 // ==================== 辅助函数 ====================
